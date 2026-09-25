@@ -28,6 +28,23 @@ describe("initial migration", () => {
     expect(followup).toContain("updated_at timestamptz");
   });
 
+  it("adds the forensics key directory and credential ledger in migration 0003", () => {
+    const forensics = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../migrations/0003_forensics.sql"),
+      "utf8"
+    );
+    expect(forensics).toContain("CREATE TABLE forensics_signing_keys");
+    expect(forensics).toContain("CREATE TABLE media_credentials");
+    // Private key is nullable: retirement erases it while the public key stays.
+    expect(forensics).toContain("private_key_enc text");
+    // Exactly one active signing key, and one immutable deletion credential per media.
+    expect(forensics).toContain("ON forensics_signing_keys ((1)) WHERE status = 'active'");
+    expect(forensics).toContain("ON media_credentials(media_id) WHERE type = 'media.deleted'");
+    // Sealed public id lives on the asset; credentials FK the key directory.
+    expect(forensics).toContain("ADD COLUMN public_id text");
+    expect(forensics).toMatch(/kid text NOT NULL REFERENCES forensics_signing_keys\(kid\)/);
+  });
+
   it("uses PostGIS geography points and spatial indexes", () => {
     expect(migration).toContain("geography(Point, 4326)");
     expect(migration).toContain("USING gist (geom)");

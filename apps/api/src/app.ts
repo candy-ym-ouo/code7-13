@@ -12,6 +12,7 @@ import { mediaRoutes } from "./routes/media";
 import { commentRoutes } from "./routes/comments";
 import { reportRoutes } from "./routes/reports";
 import { moderationRoutes } from "./routes/moderation";
+import { forensicsRoutes } from "./routes/forensics";
 
 export async function buildApp() {
   const app = Fastify({
@@ -59,6 +60,7 @@ export async function buildApp() {
     api.register(commentRoutes);
     api.register(reportRoutes);
     api.register(moderationRoutes);
+    api.register(forensicsRoutes);
   }, { prefix: "/api/v1" });
 
   app.setErrorHandler((error, request, reply) => {

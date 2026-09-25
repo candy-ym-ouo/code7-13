@@ -18,8 +18,9 @@ apps/
   web/       Vue 3 前端
   worker/    媒体隐私处理、邮件 outbox、定时维护
 packages/
-  shared/    共享 Zod 合约、分类定义、密码与令牌工具
-  db/        数据库迁移、分类种子、管理员创建 CLI
+  shared/      共享 Zod 合约、分类定义、密码与令牌工具
+  forensics/  媒体取证：可验证凭证、签名密钥轮换、隐形水印、密封公开地址
+  db/          数据库迁移、分类种子、管理员创建 CLI
 infra/
   caddy/     生产反向代理
   minio/     私有桶、公开桶和浏览器 CORS
@@ -96,6 +97,7 @@ VITE_TILE_URL=https://tiles.example.com/{z}/{x}/{y}.png
 - 密码使用 Argon2id。
 - 对象级权限在服务端重新检查，不能依靠前端路由。
 - 私有原图不公开；审核预览使用短期签名 URL。
+- 处理图与删除均签发可验证凭证；签名密钥轮换后旧凭证仍可用保留的公钥校验；公开地址由服务端密钥派生、不可枚举，凭证不含原图哈希（见[媒体取证与水印](docs/forensics.md)）。
 - 生产环境必须使用 HTTPS、强密钥、受控 SMTP 和备份。
 - 媒体检测器未配置时不会自动发布，必须经过人工隐私确认。
 
@@ -104,4 +106,5 @@ VITE_TILE_URL=https://tiles.example.com/{z}/{x}/{y}.png
 - [项目规格](docs/项目文档.md)
 - [API 约定](docs/api.md)
 - [隐私与媒体处理](docs/privacy.md)
+- [媒体取证与水印](docs/forensics.md)
 - [部署与运维](docs/operations.md)

@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { mediaUploadCompleteSchema, mediaUploadInitSchema } from "@map/shared/contracts";
 import { config } from "../config";
-import { query, transaction } from "../db";
+import { query, transaction, pool } from "../db";
 import { AppError, conflict, forbidden, notFound } from "../errors";
 import { requireAuth, requireModerator, requireVerifiedContributor } from "../auth";
 import {
@@ -16,6 +16,8 @@ import {
 } from "../storage";
 import { enqueueMediaProcessing } from "../queue";
 import { recordAudit } from "../audit";
+import { getForensicsService } from "../forensics";
+import { PgCredentialLedger, publicObjectKey, publicThumbnailObjectKey } from "@map/forensics";
 
 function extensionForMime(mime: string) {
   if (mime === "image/jpeg") return "jpg";
@@ -28,6 +30,7 @@ function mediaResponse(row: {
   privacy_status: string;
   public_object_key: string | null;
   public_thumbnail_object_key: string | null;
+  public_id: string | null;
   privacy_report: unknown;
   failure_code: string | null;
   created_at: Date;
@@ -38,6 +41,7 @@ function mediaResponse(row: {
     status: row.privacy_status,
     url: row.privacy_status === "ready" ? publicMediaUrl(row.public_object_key) : null,
     thumbnailUrl: row.privacy_status === "ready" ? publicMediaUrl(row.public_thumbnail_object_key) : null,
+    publicId: row.privacy_status === "ready" ? row.public_id : null,
     privacyReport: row.privacy_report,
     failureCode: row.failure_code,
     createdAt: row.created_at,
@@ -137,10 +141,11 @@ export async function mediaRoutes(app: FastifyInstance) {
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     const result = await query<{
       id: string; owner_id: string; privacy_status: string; public_object_key: string | null;
-      public_thumbnail_object_key: string | null; privacy_report: unknown; failure_code: string | null;
+      public_thumbnail_object_key: string | null; public_id: string | null;
+      privacy_report: unknown; failure_code: string | null;
       created_at: Date; processed_at: Date | null;
     }>(
-      `SELECT id, owner_id, privacy_status, public_object_key, public_thumbnail_object_key,
+      `SELECT id, owner_id, privacy_status, public_object_key, public_thumbnail_object_key, public_id,
               privacy_report, failure_code, created_at, processed_at
        FROM media_assets WHERE id = $1 AND deleted_at IS NULL`,
       [params.id]
@@ -204,9 +209,11 @@ export async function mediaRoutes(app: FastifyInstance) {
       thumbnail_object_key: string | null;
       public_object_key: string | null;
       public_thumbnail_object_key: string | null;
+      public_id: string | null;
+      sha256: string | null;
     }>(
       `SELECT id, privacy_status, processed_object_key, thumbnail_object_key,
-              public_object_key, public_thumbnail_object_key
+              public_object_key, public_thumbnail_object_key, public_id, sha256
        FROM media_assets WHERE id = $1 AND deleted_at IS NULL`,
       [params.id]
     );
@@ -215,9 +222,21 @@ export async function mediaRoutes(app: FastifyInstance) {
     if (media.privacy_status !== "manual_review" || !media.processed_object_key) {
       throw conflict("Media is not waiting for manual privacy approval");
     }
+    if (!media.public_id || !media.sha256) {
+      throw conflict("Processed credential is missing; reprocess the media before approving");
+    }
 
-    const publicKey = `media/${params.id}.webp`;
-    const thumbnailKey = `media/${params.id}.thumb.webp`;
+    // Sealed key derived from the signed processed credential — never guessable
+    // from the media id, and bound to the watermarked processed bytes.
+    getForensicsService();
+    const ledger = new PgCredentialLedger(pool);
+    const processedCredential = await ledger.getLatestByType(params.id, "media.processed");
+    if (!processedCredential || processedCredential.payload.type !== "media.processed") {
+      throw conflict("Processed credential not found");
+    }
+    const publicId = processedCredential.payload.publicId;
+    const publicKey = publicObjectKey(publicId);
+    const thumbnailKey = publicThumbnailObjectKey(publicId);
     try {
       await publishMediaObject(media.processed_object_key, publicKey);
       if (media.thumbnail_object_key) await publishMediaObject(media.thumbnail_object_key, thumbnailKey);
@@ -234,7 +253,8 @@ export async function mediaRoutes(app: FastifyInstance) {
           actorId: request.user!.id,
           action: "media.privacy_approved",
           resourceType: "media",
-          resourceId: params.id
+          resourceId: params.id,
+          metadata: { publicId }
         });
       });
     } catch (error) {
@@ -245,7 +265,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       throw error;
     }
 
-    return { status: "ready", url: publicMediaUrl(publicKey), thumbnailUrl: media.thumbnail_object_key ? publicMediaUrl(thumbnailKey) : null };
+    return { status: "ready", url: publicMediaUrl(publicKey), thumbnailUrl: media.thumbnail_object_key ? publicMediaUrl(thumbnailKey) : null, publicId };
   });
 
   app.delete("/media/:id", { preHandler: requireAuth }, async (request) => {
@@ -293,14 +313,56 @@ export async function mediaRoutes(app: FastifyInstance) {
       });
     });
 
-    const removals = [
-      deleteObject(config.S3_QUARANTINE_BUCKET, media.quarantine_object_key),
-      media.processed_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, media.processed_object_key) : Promise.resolve(),
-      media.public_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, media.public_object_key) : Promise.resolve(),
-      media.public_thumbnail_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, media.public_thumbnail_object_key) : Promise.resolve(),
-      media.thumbnail_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, media.thumbnail_object_key) : Promise.resolve()
+    // Capture per-object outcomes, then sign deletion evidence. The credential
+    // references only hashes/opaque kinds, never the original bytes.
+    const removalTargets = [
+      { kind: "original" as const, bucket: config.S3_QUARANTINE_BUCKET, key: media.quarantine_object_key },
+      ...(media.processed_object_key
+        ? [{ kind: "processed" as const, bucket: config.S3_QUARANTINE_BUCKET, key: media.processed_object_key }]
+        : []),
+      ...(media.thumbnail_object_key
+        ? [{ kind: "thumbnail" as const, bucket: config.S3_QUARANTINE_BUCKET, key: media.thumbnail_object_key }]
+        : []),
+      ...(media.public_object_key
+        ? [{ kind: "public" as const, bucket: config.S3_PUBLIC_BUCKET, key: media.public_object_key }]
+        : []),
+      ...(media.public_thumbnail_object_key
+        ? [{ kind: "public_thumbnail" as const, bucket: config.S3_PUBLIC_BUCKET, key: media.public_thumbnail_object_key }]
+        : [])
     ];
-    await Promise.allSettled(removals);
-    return { status: "deleted" };
+    const outcomes = await Promise.allSettled(
+      removalTargets.map((target) => deleteObject(target.bucket, target.key))
+    );
+
+    const deletedBy =
+      request.user!.role === "admin" ? "admin"
+        : request.user!.role === "moderator" ? "moderator"
+          : "owner";
+    let credential: { token: string; credentialHash: string } | null = null;
+    try {
+      const issued = await getForensicsService().issueDeletion({
+        mediaId: params.id,
+        deletedBy,
+        removedObjects: removalTargets.map((target, index) => ({
+          kind: target.kind,
+          removed: outcomes[index]?.status === "fulfilled"
+        }))
+      });
+      credential = { token: issued.token, credentialHash: issued.credentialHash };
+    } catch (error) {
+      // Evidence failure must not resurrect already-deleted objects; the worker
+      // cleanup also signs a fallback system credential. Log for follow-up.
+      request.log.error({ err: error, mediaId: params.id }, "failed to issue deletion credential");
+    }
+
+    return {
+      status: "deleted",
+      credential: credential?.token ?? null,
+      credentialHash: credential?.credentialHash ?? null,
+      removedObjects: removalTargets.map((target, index) => ({
+        kind: target.kind,
+        removed: outcomes[index]?.status === "fulfilled"
+      }))
+    };
   });
 }

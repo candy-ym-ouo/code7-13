@@ -24,7 +24,10 @@ const envSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().default("10m"),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   MEDIA_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
-  MEDIA_MAX_PER_FEATURE: z.coerce.number().int().positive().default(6)
+  MEDIA_MAX_PER_FEATURE: z.coerce.number().int().positive().default(6),
+  FORENSICS_MASTER_KEY: z.string().min(16),
+  FORENSICS_WATERMARK_SECRET: z.string().min(16),
+  FORENSICS_ADDRESS_SECRET: z.string().min(16)
 });
 
 export const config = envSchema.parse(process.env);

@@ -29,7 +29,10 @@ const envSchema = z.object({
   SMTP_SECURE: z.string().default("false").transform((value) => value === "true"),
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
-  MAIL_FROM: z.string().default("公共空间细节地图 <noreply@example.test>")
+  MAIL_FROM: z.string().default("公共空间细节地图 <noreply@example.test>"),
+  FORENSICS_MASTER_KEY: z.string().min(16),
+  FORENSICS_WATERMARK_SECRET: z.string().min(16),
+  FORENSICS_ADDRESS_SECRET: z.string().min(16)
 });
 
 export const config = envSchema.parse(process.env);

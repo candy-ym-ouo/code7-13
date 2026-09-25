@@ -12,6 +12,9 @@ beforeAll(async () => {
   process.env.S3_QUARANTINE_BUCKET = "quarantine";
   process.env.S3_PUBLIC_BUCKET = "public";
   process.env.PRIVACY_DETECTOR_URL = "";
+  process.env.FORENSICS_MASTER_KEY = "test-forensics-master-key";
+  process.env.FORENSICS_WATERMARK_SECRET = "test-forensics-watermark-secret";
+  process.env.FORENSICS_ADDRESS_SECRET = "test-forensics-address-secret";
   const module = await import("./privacy");
   processPrivacyImage = module.processPrivacyImage;
 });
