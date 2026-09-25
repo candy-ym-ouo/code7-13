@@ -5,7 +5,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./contracts": "./src/contracts.ts",
-    "./server": "./src/server.ts"
+    "./server": "./src/server.ts",
+    "./forensics": "./src/forensics.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

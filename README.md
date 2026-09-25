@@ -5,6 +5,7 @@
 - 前端：Vue 3、TypeScript、Vite、MapLibre GL JS、Pinia。
 - 后端：Node.js、Fastify、PostgreSQL/PostGIS、Redis/BullMQ。
 - 媒体：MinIO/S3 私有隔离区与服务公开桶、Sharp 服务端模糊、ClamAV 扫描。
+- 取证：处理图嵌入不可见水印并签发 Ed25519 可验证凭证，删除同样出证；密钥轮换后旧凭证仍可公开校验。
 - 审核：投稿、评论、媒体隐私和举报均进入真实审核队列。
 - 原则：没有 mock 数据、没有内存数据库、没有绕过审核的发布路径。
 
@@ -96,6 +97,7 @@ VITE_TILE_URL=https://tiles.example.com/{z}/{x}/{y}.png
 - 密码使用 Argon2id。
 - 对象级权限在服务端重新检查，不能依靠前端路由。
 - 私有原图不公开；审核预览使用短期签名 URL。
+- 处理图携带不可见水印和处理/删除签名凭证；公开校验地址只暴露白名单声明，不泄露原图。
 - 生产环境必须使用 HTTPS、强密钥、受控 SMTP 和备份。
 - 媒体检测器未配置时不会自动发布，必须经过人工隐私确认。
 

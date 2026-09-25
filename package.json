@@ -15,7 +15,8 @@
     "verify": "pnpm lint && pnpm test && pnpm build",
     "db:migrate": "pnpm --filter @map/db migrate",
     "db:seed": "pnpm --filter @map/db seed",
-    "admin:create": "pnpm --filter @map/db admin:create"
+    "admin:create": "pnpm --filter @map/db admin:create",
+    "forensics:rotate": "pnpm --filter @map/db forensics:rotate"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

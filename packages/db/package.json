@@ -6,6 +6,7 @@
     "migrate": "tsx src/migrate.ts",
     "seed": "tsx src/seed.ts",
     "admin:create": "tsx src/admin.ts",
+    "forensics:rotate": "tsx src/rotate-signing-key.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

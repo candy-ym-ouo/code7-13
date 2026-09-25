@@ -2,9 +2,15 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { privacyRegionSchema, type PrivacyRegion } from "@map/shared/contracts";
 import { config } from "./config";
+import { embedWatermark } from "./watermark";
 
 export type DetectorResponse = {
   regions?: PrivacyRegion[];
+};
+
+export type WatermarkOptions = {
+  fingerprint: string;
+  secret: string;
 };
 
 export type ProcessedImage = {
@@ -16,6 +22,7 @@ export type ProcessedImage = {
   perceptualHash: string;
   detectorRegions: PrivacyRegion[];
   manualRegions: PrivacyRegion[];
+  watermarkEmbedded: boolean;
 };
 
 async function detectRegions(buffer: Buffer): Promise<PrivacyRegion[]> {
@@ -67,7 +74,11 @@ function averageHash(input: Buffer): string {
   return hash;
 }
 
-export async function processPrivacyImage(source: Buffer, manualRegions: PrivacyRegion[]): Promise<ProcessedImage> {
+export async function processPrivacyImage(
+  source: Buffer,
+  manualRegions: PrivacyRegion[],
+  watermark?: WatermarkOptions
+): Promise<ProcessedImage> {
   const sourceImage = sharp(source, {
     failOn: "error",
     limitInputPixels: config.MEDIA_MAX_PIXELS
@@ -103,7 +114,33 @@ export async function processPrivacyImage(source: Buffer, manualRegions: Privacy
 
   let pipeline = sharp(normalized.data);
   if (composites.length) pipeline = pipeline.composite(composites);
-  const image = await pipeline.webp({ quality: 86, effort: 4 }).toBuffer();
+
+  // 水印嵌在最终 WebP 编码之前，与模糊后的像素绑定，公开图可追溯到处理凭证
+  let imageSource: sharp.Sharp = pipeline;
+  let watermarkEmbedded = false;
+  if (watermark) {
+    // sharp 实例只能消费一次，克隆后再取 raw，图像太小时回退到原管线
+    const flattened = await pipeline.clone().raw().toBuffer({ resolveWithObject: true });
+    const embedded = embedWatermark(
+      flattened.data,
+      flattened.info.width,
+      flattened.info.height,
+      flattened.info.channels,
+      watermark.fingerprint,
+      watermark.secret
+    );
+    if (embedded) {
+      imageSource = sharp(embedded, {
+        raw: {
+          width: flattened.info.width,
+          height: flattened.info.height,
+          channels: flattened.info.channels
+        }
+      });
+      watermarkEmbedded = true;
+    }
+  }
+  const image = await imageSource.webp({ quality: 86, effort: 4 }).toBuffer();
 
   const thumbnail = await sharp(image)
     .resize({ width: 720, height: 720, fit: "inside", withoutEnlargement: true })
@@ -120,6 +157,7 @@ export async function processPrivacyImage(source: Buffer, manualRegions: Privacy
     sha256: createHash("sha256").update(image).digest("hex"),
     perceptualHash: averageHash(hashInput),
     detectorRegions,
-    manualRegions
+    manualRegions,
+    watermarkEmbedded
   };
 }

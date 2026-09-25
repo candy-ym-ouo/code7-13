@@ -1,9 +1,23 @@
+import { randomUUID } from "node:crypto";
 import type { PrivacyRegion } from "@map/shared/contracts";
+import {
+  createKeyStore,
+  deriveWatermarkSecret,
+  issueCredential,
+  watermarkFingerprint,
+  type QueryFn
+} from "@map/shared/forensics";
 import { config } from "./config";
 import { pool } from "./db";
 import { deleteObject, objectExists, readQuarantineObject, writeQuarantineObject, copyToPublic } from "./storage";
 import { scanForMalware } from "./clamav";
 import { processPrivacyImage } from "./privacy";
+
+const queryFn: QueryFn = (text, params) => pool.query(text, params);
+
+function signingKeyStore() {
+  return createKeyStore(queryFn, config.MEDIA_SIGNING_KEK);
+}
 
 export async function processMediaJob(mediaId: string): Promise<void> {
   const result = await pool.query<{
@@ -34,7 +48,9 @@ export async function processMediaJob(mediaId: string): Promise<void> {
 
     await pool.query("UPDATE media_assets SET privacy_status = 'processing', updated_at = now() WHERE id = $1", [mediaId]);
     const manualRegions = media.privacy_report?.manualRegions ?? [];
-    const processed = await processPrivacyImage(source, manualRegions);
+    const watermarkSecret = deriveWatermarkSecret(config.MEDIA_SIGNING_KEK);
+    const fingerprint = watermarkFingerprint(watermarkSecret, mediaId);
+    const processed = await processPrivacyImage(source, manualRegions, { fingerprint, secret: watermarkSecret });
 
     const processedKey = `processed/${mediaId}.webp`;
     const thumbnailKey = `processed/${mediaId}.thumb.webp`;
@@ -52,6 +68,7 @@ export async function processMediaJob(mediaId: string): Promise<void> {
       detectorConfigured: autoPublish,
       originalMetadataRemoved: true,
       serverReencoded: true,
+      watermarkEmbedded: processed.watermarkEmbedded,
       width: processed.width,
       height: processed.height,
       sha256: processed.sha256,
@@ -59,38 +76,70 @@ export async function processMediaJob(mediaId: string): Promise<void> {
       completedAt: new Date().toISOString()
     };
 
-    await pool.query(
-      `UPDATE media_assets
-       SET privacy_status = $2,
-           processed_object_key = $3,
-           thumbnail_object_key = $4,
-           public_object_key = $5,
-           public_thumbnail_object_key = $12,
-           width = $6,
-           height = $7,
-           sha256 = $8,
-           perceptual_hash = $9,
-           privacy_report = $10::jsonb,
-           failure_code = NULL,
-           processed_at = now(),
-           delete_after = now() + ($11::text || ' hours')::interval,
-           updated_at = now()
-       WHERE id = $1`,
-      [
+    // 媒体更新与处理凭证在同一事务提交：没有凭证的处理图不得进入公开流程
+    const signingKey = await signingKeyStore().ensureActiveKey();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE media_assets
+         SET privacy_status = $2,
+             processed_object_key = $3,
+             thumbnail_object_key = $4,
+             public_object_key = $5,
+             public_thumbnail_object_key = $12,
+             width = $6,
+             height = $7,
+             sha256 = $8,
+             perceptual_hash = $9,
+             privacy_report = $10::jsonb,
+             failure_code = NULL,
+             processed_at = now(),
+             delete_after = now() + ($11::text || ' hours')::interval,
+             updated_at = now()
+         WHERE id = $1`,
+        [
+          mediaId,
+          autoPublish ? "ready" : "manual_review",
+          processedKey,
+          thumbnailKey,
+          autoPublish ? publicKey : null,
+          processed.width,
+          processed.height,
+          processed.sha256,
+          processed.perceptualHash,
+          JSON.stringify(report),
+          String(config.ORIGINAL_RETENTION_HOURS),
+          autoPublish ? publicThumbnailKey : null
+        ]
+      );
+      await issueCredential((text, params) => client.query(text, params), signingKey, {
+        id: randomUUID(),
         mediaId,
-        autoPublish ? "ready" : "manual_review",
-        processedKey,
-        thumbnailKey,
-        autoPublish ? publicKey : null,
-        processed.width,
-        processed.height,
-        processed.sha256,
-        processed.perceptualHash,
-        JSON.stringify(report),
-        String(config.ORIGINAL_RETENTION_HOURS),
-        autoPublish ? publicThumbnailKey : null
-      ]
-    );
+        type: "processed",
+        claims: {
+          mediaId,
+          processedSha256: processed.sha256,
+          perceptualHash: processed.perceptualHash,
+          width: processed.width,
+          height: processed.height,
+          watermarkFingerprint: processed.watermarkEmbedded ? fingerprint : null,
+          processedAt: new Date().toISOString(),
+          privacy: {
+            metadataRemoved: true,
+            serverReencoded: true,
+            manualRegionCount: processed.manualRegions.length,
+            detectorRegionCount: processed.detectorRegions.length
+          }
+        }
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
 
     console.log(`media ${mediaId} processed as ${autoPublish ? "ready" : "manual_review"}`);
   } catch (error) {
@@ -183,9 +232,11 @@ export async function cleanupDeletedMediaObjects(): Promise<void> {
     thumbnail_object_key: string | null;
     public_object_key: string | null;
     public_thumbnail_object_key: string | null;
+    sha256: string | null;
+    deleted_at: Date | null;
   }>(
     `SELECT id, quarantine_object_key, processed_object_key, thumbnail_object_key,
-            public_object_key, public_thumbnail_object_key
+            public_object_key, public_thumbnail_object_key, sha256, deleted_at
      FROM media_assets
      WHERE privacy_status = 'deleted'
        AND (quarantine_object_key NOT LIKE 'deleted/%'
@@ -195,6 +246,9 @@ export async function cleanupDeletedMediaObjects(): Promise<void> {
          OR public_thumbnail_object_key IS NOT NULL)
      LIMIT 50`
   );
+
+  // 对象确认清除后签发删除凭证；签发失败时行保持待清理状态，下个周期重试
+  const signingKey = result.rows.length ? await signingKeyStore().ensureActiveKey() : null;
 
   for (const item of result.rows) {
     try {
@@ -207,6 +261,19 @@ export async function cleanupDeletedMediaObjects(): Promise<void> {
       if (item.public_object_key) removals.push(deleteObject(config.S3_PUBLIC_BUCKET, item.public_object_key));
       if (item.public_thumbnail_object_key) removals.push(deleteObject(config.S3_PUBLIC_BUCKET, item.public_thumbnail_object_key));
       await Promise.all(removals);
+
+      await issueCredential(queryFn, signingKey!, {
+        id: randomUUID(),
+        mediaId: item.id,
+        type: "deleted",
+        claims: {
+          mediaId: item.id,
+          processedSha256: item.sha256,
+          deletedAt: (item.deleted_at ?? new Date()).toISOString(),
+          scope: "all_objects",
+          executor: "media-maintenance"
+        }
+      });
 
       await pool.query(
         `UPDATE media_assets
